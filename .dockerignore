@@ -1,0 +1,4 @@
+__pycache__
+*.pyc
+*.log
+last_levels.json
