@@ -3,13 +3,11 @@ import time
 import json
 import threading
 import re
-import random
-import subprocess
 
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from flask import Flask
-from playwright.sync_api import sync_playwright
 
 # ======================
 # VARIÁVEIS DE AMBIENTE
@@ -35,15 +33,11 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     return (
-        "✅ Bot Playwright (online page) rodando!<br>"
+        "✅ Bot CLOUDSCRAPER rodando!<br>"
         f"Jogadores monitorados: {', '.join(WATCHED_PLAYERS) or 'nenhum'}<br>"
         f"Página de online: {ONLINE_URL}<br>"
         f"Intervalo: {CHECK_INTERVAL}s"
     )
-
-@app.route("/health")
-def health():
-    return "OK", 200
 
 # ======================
 # ESTADO
@@ -58,121 +52,66 @@ def load_last_levels():
     return {}
 
 def save_last_levels(d):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+
+# ======================
+# BYPASS CLOUDFLARE (CLOUDSCRAPER)
+# ======================
+
+scraper = cloudscraper.create_scraper(
+    browser={
+        "browser": "chrome",
+        "platform": "windows",
+        "mobile": False
+    }
+)
+
+def fetch_online_html():
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"[ERRO] Falha ao salvar {STATE_FILE}: {e}")
+        print(f"[DEBUG] Acessando {ONLINE_URL} com CloudScraper...")
+        r = scraper.get(ONLINE_URL, timeout=30)
 
-# ============================
-# PLAYWRIGHT BYPASS CLOUDFLARE
-# ============================
+        if r.status_code != 200:
+            print(f"[ERRO] Status {r.status_code}")
+            return None
 
-def _install_webkit():
-    """Instala o navegador WebKit se ainda não existir."""
-    print("[INFO] WebKit não encontrado. Executando 'playwright install webkit'...")
-    try:
-        # check=False pra não quebrar o processo se der algum warning
-        subprocess.run(["playwright", "install", "webkit"], check=True)
-        print("[INFO] WebKit instalado com sucesso.")
-    except Exception as e:
-        print(f"[ERRO] Falha ao instalar WebKit: {e}")
+        html = r.text
 
-def fetch_online_html(_retry=False):
-    """
-    Abre a página de online em um navegador headless (WebKit via Playwright)
-    e retorna o HTML. Se o executável não existir, instala automaticamente.
-    """
-    print(f"[DEBUG] Abrindo página (WebKit stealth): {ONLINE_URL}")
-
-    try:
-        with sync_playwright() as pw:
-            # WEBKIT — menos detectado que Chromium
-            browser = pw.webkit.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-web-security",
-                ]
+        if "Just a moment" in html or "cf-browser-verification" in html:
+            print("❌ Cloudflare bloqueou. Tentando headers extras...")
+            r = scraper.get(ONLINE_URL, timeout=30,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/120.0.0.0 Safari/537.36"
+                }
             )
+            html = r.text
 
-            # CONTEXTO COM SPOOFING REAL
-            context = browser.new_context(
-                user_agent=(
-                    f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_{random.randint(1,9)}) "
-                    f"AppleWebKit/605.1.{random.randint(1,40)} (KHTML, like Gecko) "
-                    f"Version/{random.randint(12,16)}.1 Safari/605.1.{random.randint(1,40)}"
-                ),
-                locale="en-US",
-                timezone_id="America/Sao_Paulo",
-                permissions=[],
-                viewport={"width": random.randint(1100,1400), "height": random.randint(700,900)},
-            )
-
-            page = context.new_page()
-
-            page.set_extra_http_headers({
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-            })
-
-            # TENTA ATÉ PASSAR DO CLOUDFLARE
-            for attempt in range(5):
-                print(f"[DEBUG] Tentativa {attempt+1}/5")
-                page.goto(ONLINE_URL, wait_until="domcontentloaded", timeout=60000)
-                content = page.content()
-
-                if "Just a moment" not in content and "cf-browser-verification" not in content:
-                    break
-
-                print("[DEBUG] Cloudflare detectou bot. Tentando novamente...")
-                time.sleep(2)
-
-            browser_html = page.content()
-            browser.close()
-            return browser_html
+        return html
 
     except Exception as e:
-        msg = str(e)
-        # Erro clássico de navegador não instalado
-        if ("Executable doesn't exist" in msg or "playwright install" in msg) and not _retry:
-            _install_webkit()
-            # tenta mais uma vez
-            return fetch_online_html(_retry=True)
-
-        print(f"[ERRO] Playwright CF bypass: {e}")
+        print(f"[ERRO] CloudScraper: {e}")
         return None
 
-# ============================
-# PARSER DA TABELA
-# ============================
+# ======================
+# PARSER
+# ======================
 
 def parse_online_players(html):
-    """
-    Lê a tabela 'Players Online' do site.
-
-    Estrutura das colunas:
-    # | Outfit | Name | Level | Vocation
-
-    Retorna:
-      { "Nome do Player": level_int, ... }
-    """
     soup = BeautifulSoup(html, "html.parser")
     online = {}
 
     tables = soup.find_all("table")
     if not tables:
-        print("[WARN] Nenhuma tabela encontrada no HTML.")
+        print("[WARN] Nenhuma tabela encontrada.")
         return online
 
-    # acha a tabela certa
-    target = None    # tabela com os headers que a gente quer
-    for tb in tables:
-        if any(x in tb.get_text() for x in ["Players Online", "Level", "Vocation"]):
-            target = tb
+    target = None
+    for t in tables:
+        if any(x in t.get_text() for x in ["Players Online", "Vocation", "Level"]):
+            target = t
             break
 
     if not target:
@@ -184,11 +123,10 @@ def parse_online_players(html):
         if len(cols) < 4:
             continue
 
-        name_el = cols[2].find("a") or cols[2]
-        name = name_el.get_text(strip=True)
+        name = cols[2].get_text(strip=True)
+        lvl = cols[3].get_text(strip=True)
 
-        lvl_text = cols[3].get_text(strip=True)
-        m = re.search(r"\d+", lvl_text)
+        m = re.search(r"\d+", lvl)
         if not name or not m:
             continue
 
@@ -196,58 +134,46 @@ def parse_online_players(html):
 
     return online
 
-# ============================
-# NOTIFICAÇÕES
-# ============================
+# ======================
+# DISCORD
+# ======================
 
 def send_up(player, old, new):
     if not DISCORD_WEBHOOK:
         return
-    embed = {
-        "title": "☠️ UPOU PARA MORRER",
-        "description": f"**{player}** subiu de nível!",
-        "color": 0x00FF00,
-        "fields": [
-            {"name": "Jogador", "value": player, "inline": True},
-            {"name": "Level", "value": f"{old} → {new}", "inline": True},
-        ],
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
-    except Exception as e:
-        print(f"[ERRO] Webhook UP: {e}")
+    requests.post(DISCORD_WEBHOOK, json={
+        "embeds": [{
+            "title": "⚡ UP!",
+            "description": f"{player} subiu de {old} → {new}",
+            "color": 0x00FF00
+        }]
+    })
 
 def send_down(player, old, new):
     if not DISCORD_WEBHOOK:
         return
-    embed = {
-        "title": "💀 XIIII MORREU NOOB",
-        "description": f"**{player}** perdeu level!",
-        "color": 0xFF0000,
-        "fields": [
-            {"name": "Jogador", "value": player, "inline": True},
-            {"name": "Level", "value": f"{old} → {new}", "inline": True},
-        ],
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
-    except Exception as e:
-        print(f"[ERRO] Webhook DOWN: {e}")
+    requests.post(DISCORD_WEBHOOK, json={
+        "embeds": [{
+            "title": "💀 DOWN!",
+            "description": f"{player} caiu de {old} → {new}",
+            "color": 0xFF0000
+        }]
+    })
 
-# ============================
-# LOOP PRINCIPAL
-# ============================
+# ======================
+# LOOP
+# ======================
 
 def monitor():
     last = load_last_levels()
-    print("▶ Bot Playwright + Online Page iniciado!")
+    print("▶ Bot CloudScraper iniciado!")
     print("Jogadores monitorados:", WATCHED_PLAYERS)
-    print("ONLINE_URL:", ONLINE_URL)
 
     while True:
         html = fetch_online_html()
+
         if not html:
-            print("❌ HTML vazio, tentando novamente...")
+            print("❌ HTML vazio, tentando de novo...")
             time.sleep(CHECK_INTERVAL)
             continue
 
@@ -259,18 +185,18 @@ def monitor():
             old = last.get(p)
 
             if current is None:
-                print(f"❌ {p} está offline ou não está na lista de online.")
+                print(f"❌ {p} OFFLINE")
                 continue
 
             if old is None:
-                print(f"📌 Primeiro registro: {p} = {current}")
+                print(f"📍 Primeiro registro: {p} = {current}")
                 last[p] = current
             elif current > old:
-                print(f"🚀 UP: {p} {old} → {current}")
+                print(f"⚡ UP {p}: {old} → {current}")
                 send_up(p, old, current)
                 last[p] = current
             elif current < old:
-                print(f"💀 DOWN: {p} {old} → {current}")
+                print(f"💀 DOWN {p}: {old} → {current}")
                 send_down(p, old, current)
                 last[p] = current
             else:
@@ -280,9 +206,9 @@ def monitor():
         print(f"⏳ Aguardando {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
 
-# ============================
+# ======================
 # MAIN
-# ============================
+# ======================
 
 if __name__ == "__main__":
     t = threading.Thread(target=monitor, daemon=True)
