@@ -82,13 +82,20 @@ def fetch_online_html() -> str | None:
     """
     Abre a página de online em um navegador headless (Chromium via Playwright)
     e retorna o HTML.
+
+    Aqui usamos wait_until="domcontentloaded" em vez de "networkidle"
+    para evitar timeout em páginas que ficam fazendo requisições contínuas.
     """
     print(f"[DEBUG] Abrindo página de online: {ONLINE_URL}")
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(ONLINE_URL, timeout=30000, wait_until="networkidle")
+            page.goto(
+                ONLINE_URL,
+                timeout=60000,              # 60s de timeout
+                wait_until="domcontentloaded"  # em vez de "networkidle"
+            )
             html = page.content()
             browser.close()
             return html
@@ -102,39 +109,38 @@ def fetch_online_html() -> str | None:
 
 def parse_online_players(html: str) -> dict:
     """
-    Converte o HTML em um dicionário:
-    {
-        "Jogador1": 500,
-        "Jogador2": 750,
-        ...
-    }
+    Lê a tabela 'Players Online' do site.
 
-    Assumindo uma tabela do tipo:
-      <tr><td>Nome</td><td>Level</td></tr>
-    Se o seu HTML for diferente, adaptamos essa função.
+    Estrutura das colunas:
+    # | Outfit | Name | Level | Vocation
+
+    Retorna:
+      { "Nome do Player": level_int, ... }
     """
     soup = BeautifulSoup(html, "html.parser")
     online = {}
 
+    # Procura todas as linhas da tabela
     for row in soup.find_all("tr"):
         cols = row.find_all("td")
-        if len(cols) < 2:
-            continue
+        if len(cols) < 4:
+            continue  # precisa ter pelo menos: #, outfit, name, level
 
-        name = cols[0].get_text(strip=True)
-        lvl_txt = cols[1].get_text(strip=True)
+        # Coluna 2 = Name (índice 2)
+        name = cols[2].get_text(strip=True)
+        # Coluna 3 = Level (índice 3)
+        lvl_txt = cols[3].get_text(strip=True)
 
         if not name:
             continue
-
-        # só aceita level que seja número
-        if not re.fullmatch(r"\d+", lvl_txt):
+        if not lvl_txt.isdigit():
             continue
 
         level = int(lvl_txt)
         online[name] = level
 
     return online
+
 
 # ======================
 # DISCORD
