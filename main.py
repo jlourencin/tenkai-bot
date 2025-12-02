@@ -76,29 +76,25 @@ def send_embed_to_discord(jogador, old_level, new_level):
         "description": f"**{jogador}** subiu de nível e já vai morrer kkkk xd ☠️🔪",
         "color": 0x00FF00,
         "fields": [
-            {"name": "💩 Jogador", "value": jogador, "inline": True},
-            {"name": "📈 Level", "value": f"{old_level} → {new_level}", "inline": True},
+            {
+                "name": "💩 Jogador",
+                "value": jogador,
+                "inline": True,
+            },
+            {
+                "name": "📈 Level",
+                "value": f"{old_level} -> {new_level}",
+                "inline": True,
+            },
         ],
-        "footer": {"text": "🔥 JOHTTO HACKER DEUS"},
+        "footer": {
+            "text": "🔥 JOHTTO HACKER DEUS",
+        },
     }
+
     payload = {"embeds": [embed]}
 
     try:
         response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-        if response.status_code not in [200, 204]:
-            print(f"[ERRO] Webhook falhou com status {response.status_code}")
-            print(f"[RESPOSTA] {response.text}")
-        else:
-            print("[OK] Mensagem de UP enviada ao Discord.")
-    except Exception as e:
-        print(f"[ERRO] Falha ao enviar embed de UP: {e}")
-
-
-def send_death_embed_to_discord(jogador, old_level, new_level):
-    embed = {
-        "title": "💀 XIIII MORREU NOOB",
-        "description": f"☠️ **{jogador}** já morreu noobasso",
-        "color": 0xFF0000,
-        "fields": [
-            {"name": "💩 Jogador", "value": jogador, "inline": True},
-            {"name": "📉 Level", "value": f"{o
+        if response.status_code not in (200, 204):
+            print(f"[ERRO] Webhook falhou com status
