@@ -71,36 +71,31 @@ scraper = cloudscraper.create_scraper(
     }
 )
 
+from curl_cffi import requests as curl_requests
+
 def fetch_online_html():
     try:
-        print(f"[DEBUG] Acessando {ONLINE_URL} com CloudScraper...")
-        r = scraper.get(ONLINE_URL, timeout=30)
+        print(f"[DEBUG] Acessando {ONLINE_URL} com curl_cffi (TLS real)...")
+
+        r = curl_requests.get(
+            ONLINE_URL,
+            impersonate="chrome120",   # fingerprint real
+            timeout=20,
+            verify=False,              # ignora SSL estranho
+            headers={
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "accept-language": "en-US,en;q=0.9",
+            },
+        )
 
         if r.status_code != 200:
             print(f"[ERRO] Status {r.status_code}")
             return None
 
-        html = r.text
-
-        if "Just a moment" in html or "cf-browser-verification" in html:
-            print("❌ Cloudflare bloqueou. Tentando headers extras...")
-            r = scraper.get(
-                ONLINE_URL,
-                timeout=30,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
-                },
-            )
-            html = r.text
-
-        return html
+        return r.text
 
     except Exception as e:
-        print(f"[ERRO] CloudScraper: {e}")
+        print(f"[ERRO] curl_cffi: {e}")
         return None
 
 # ======================
