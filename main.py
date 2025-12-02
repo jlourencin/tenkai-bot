@@ -80,7 +80,8 @@ def save_last_levels(levels):
 def fetch_online_html() -> str | None:
     """
     Abre a página de online em um navegador headless (Chromium via Playwright)
-    e retorna o HTML.
+    e retorna o HTML. Tenta pegar também conteúdo de frames/iframes
+    que contenham 'online' na URL.
     """
     print(f"[DEBUG] Abrindo página de online: {ONLINE_URL}")
     try:
@@ -103,9 +104,39 @@ def fetch_online_html() -> str | None:
                 timeout=60000,
                 wait_until="domcontentloaded",
             )
-            # pequena espera pra garantir que carregou tudo
+
+            # URL final (caso tenha redirect)
+            print(f"[DEBUG] URL final carregada: {page.url}")
+
+            # Espera um pouco pra qualquer JS terminar
             page.wait_for_timeout(2000)
-            html = page.content()
+
+            # Lista todos os frames (caso a tabela esteja em iframe)
+            frames = page.frames
+            print("[DEBUG] Frames encontrados:")
+            for i, fr in enumerate(frames):
+                print(f"  [{i}] {fr.url}")
+
+            # Heurística: tenta pegar um frame com 'online' ou 'whoisonline' na URL
+            target_frame = None
+            for fr in frames:
+                url = (fr.url or "").lower()
+                if any(k in url for k in ["online", "whoisonline", "whois"]):
+                    target_frame = fr
+                    break
+
+            if target_frame is None:
+                target_frame = page.main_frame
+                print("[DEBUG] Usando main_frame para pegar HTML.")
+            else:
+                print(f"[DEBUG] Usando frame com URL: {target_frame.url}")
+
+            html = target_frame.content()
+
+            # Log de debug do início do HTML
+            preview = html[:800].replace("\n", "\\n")
+            print(f"[DEBUG] Início do HTML capturado: {preview}")
+
             browser.close()
             return html
     except Exception as e:
