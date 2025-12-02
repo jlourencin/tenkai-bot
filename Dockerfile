@@ -1,6 +1,9 @@
 FROM python:3.10-slim
 
-# Instala dependências necessárias do Playwright
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Dependências necessárias pro Chromium/Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -24,18 +27,18 @@ RUN apt-get update && apt-get install -y \
     libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Playwright
-RUN pip install playwright
-RUN playwright install chromium
-
-# Copiar projeto
 WORKDIR /app
+
+# instala libs Python
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# instala o navegador Chromium do Playwright
+RUN python -m playwright install chromium
+
+# copia o resto do projeto
 COPY . .
 
-# Instalar requirements.txt
-RUN pip install -r requirements.txt
-
-# Expor porta 8080
 EXPOSE 8080
 
 CMD ["python", "main.py"]
