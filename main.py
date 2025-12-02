@@ -29,7 +29,6 @@ if not DISCORD_WEBHOOK:
 # ======================
 # CONFIGURAÇÃO DO SITE
 # ======================
-# 🔧 TROQUE SOMENTE ESSA URL PARA A PÁGINA DE ONLINE DO SEU SITE
 ONLINE_URL = "https://ntotenkai.com.br/online"
 
 CHECK_INTERVAL = 60  # segundos
@@ -82,20 +81,30 @@ def fetch_online_html() -> str | None:
     """
     Abre a página de online em um navegador headless (Chromium via Playwright)
     e retorna o HTML.
-
-    Aqui usamos wait_until="domcontentloaded" em vez de "networkidle"
-    para evitar timeout em páginas que ficam fazendo requisições contínuas.
     """
     print(f"[DEBUG] Abrindo página de online: {ONLINE_URL}")
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_page()
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720},
+            )
+            page = context.new_page()
             page.goto(
                 ONLINE_URL,
-                timeout=60000,              # 60s de timeout
-                wait_until="domcontentloaded"  # em vez de "networkidle"
+                timeout=60000,
+                wait_until="domcontentloaded",
             )
+            # pequena espera pra garantir que carregou tudo
+            page.wait_for_timeout(2000)
             html = page.content()
             browser.close()
             return html
@@ -120,23 +129,37 @@ def parse_online_players(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     online = {}
 
-    # Procura todas as linhas da tabela
-    for row in soup.find_all("tr"):
+    # tenta achar a tabela que contém o texto "Players Online"
+    table = None
+    for t in soup.find_all("table"):
+        if "Players Online" in t.get_text():
+            table = t
+            break
+    if table is None:
+        # fallback: primeira tabela da página
+        table = soup.find("table")
+
+    if table is None:
+        print("[WARN] Nenhuma tabela encontrada no HTML.")
+        return online
+
+    for row in table.find_all("tr"):
         cols = row.find_all("td")
+        # precisa ter pelo menos: #, outfit, name, level
         if len(cols) < 4:
-            continue  # precisa ter pelo menos: #, outfit, name, level
-
-        # Coluna 2 = Name (índice 2)
-        name = cols[2].get_text(strip=True)
-        # Coluna 3 = Level (índice 3)
-        lvl_txt = cols[3].get_text(strip=True)
-
-        if not name:
-            continue
-        if not lvl_txt.isdigit():
             continue
 
-        level = int(lvl_txt)
+        # 3ª coluna = Name (índice 2), geralmente dentro de <a>
+        name_el = cols[2].find("a") or cols[2]
+        name = name_el.get_text(strip=True)
+
+        # 4ª coluna = Level (índice 3)
+        lvl_txt = cols[3].get_text(" ", strip=True)
+        m = re.search(r"\d+", lvl_txt)
+        if not name or not m:
+            continue
+
+        level = int(m.group(0))
         online[name] = level
 
     return online
