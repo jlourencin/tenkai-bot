@@ -39,6 +39,10 @@ def home():
         f"Intervalo: {CHECK_INTERVAL}s"
     )
 
+@app.route("/health")
+def health():
+    return "OK", 200
+
 # ======================
 # ESTADO
 # ======================
@@ -80,12 +84,16 @@ def fetch_online_html():
 
         if "Just a moment" in html or "cf-browser-verification" in html:
             print("❌ Cloudflare bloqueou. Tentando headers extras...")
-            r = scraper.get(ONLINE_URL, timeout=30,
+            r = scraper.get(
+                ONLINE_URL,
+                timeout=30,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                  "Chrome/120.0.0.0 Safari/537.36"
-                }
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                },
             )
             html = r.text
 
