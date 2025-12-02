@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import re
 import requests
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
@@ -22,11 +23,9 @@ CHECK_INTERVAL = 60
 MIN_LEVEL = 1
 STATE_FILE = "last_levels.json"
 
-# Turnstile (Cloudflare)
+# Turnstile (Cloudflare) – OPCIONAL
 TURNSTILE_SITE_KEY = os.environ.get("TURNSTILE_SITE_KEY")
 TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY")
-
-# Se estiver sem chaves → modo simulado
 TURNSTILE_ENABLED = bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY)
 
 # =========================
@@ -180,12 +179,20 @@ def save_last_levels(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def build_profile_url(name):
+def build_profile_url(name: str) -> str:
+    """
+    Monta a URL do perfil:
+    Exemplo: https://ntotenkai.com.br/characters/Alienwarre
+    """
     encoded = quote_plus(name)
-    return f"https://ntotenkai.com.br/?characters/{encoded}"
+    return f"https://ntotenkai.com.br/characters/{encoded}"
 
 
-def get_level_from_profile(name):
+def get_level_from_profile(name: str):
+    """
+    Acessa a página de perfil do char e extrai o level.
+    Retorna int ou None.
+    """
     url = build_profile_url(name)
     headers = {
         "User-Agent": (
@@ -197,35 +204,63 @@ def get_level_from_profile(name):
 
     try:
         r = requests.get(url, headers=headers, timeout=10)
+        print(f"[DEBUG] Perfil URL {name}: {url} | status {r.status_code}")
     except Exception as e:
         print(f"[ERRO] Falha ao acessar {name}: {e}")
         return None
 
     if r.status_code != 200:
+        print(f"[ERRO] Perfil de {name} retornou {r.status_code}")
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
-    td_level = soup.find("td", string=lambda s: s and s.strip().lower() == "level:")
-    if not td_level:
+
+    # Procura qualquer <td> cujo texto contenha "level" (com ou sem dois pontos)
+    def is_level_label(text):
+        if not text:
+            return False
+        t = text.strip().lower()
+        t = t.replace(":", "")
+        return t == "level"
+
+    label_td = soup.find("td", string=is_level_label)
+    if not label_td:
+        print(f"[ERRO] Não encontrei a linha de Level para {name}")
         return None
 
-    value = td_level.find_next("td").text.strip()
-    return int(value) if value.isdigit() else None
+    value_td = label_td.find_next("td")
+    if not value_td:
+        print(f"[ERRO] Não encontrei a célula de valor de Level para {name}")
+        return None
+
+    raw = value_td.get_text(strip=True)
+    # Pega o primeiro número que aparecer (ex: "527", "527 (Elite)", etc.)
+    m = re.search(r"\d+", raw)
+    if not m:
+        print(f"[ERRO] Valor de level não numérico para {name}: {raw!r}")
+        return None
+
+    level = int(m.group(0))
+    return level
 
 
 def send_up_embed(player, old, new):
     if not DISCORD_WEBHOOK:
         return
+    diff = new - old
     embed = {
         "title": "☠️ UPOU PARA MORRER",
-        "description": f"**{player}** subiu de nível! ☠️🔪",
+        "description": f"**{player}** subiu de nível e já vai morrer kkkk xd ☠️🔪",
         "color": 0x00FF00,
         "fields": [
             {"name": "Jogador", "value": player, "inline": True},
-            {"name": "Level", "value": f"{old} → {new}", "inline": True},
+            {"name": "Level", "value": f"{old} → {new} (+{diff})", "inline": True},
         ],
     }
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    except Exception as e:
+        print("[ERRO] Falha ao enviar embed de UP:", e)
 
 
 def send_death_embed(player, old, new):
@@ -240,12 +275,15 @@ def send_death_embed(player, old, new):
             {"name": "Level", "value": f"{old} → {new}", "inline": True},
         ],
     }
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    except Exception as e:
+        print("[ERRO] Falha ao enviar embed de MORTE:", e)
 
 
 def monitor_loop():
     last_levels = load_last_levels()
-    print("▶ Monitor:", WATCHED_PLAYERS)
+    print("▶ Monitorando:", WATCHED_PLAYERS)
 
     while True:
         for player in WATCHED_PLAYERS:
@@ -257,17 +295,24 @@ def monitor_loop():
             old = last_levels.get(player)
 
             if old is None:
+                print(f"🟦 Primeiro registro: {player} = {level}")
                 last_levels[player] = level
+
             elif level > old:
+                print(f"🚀 UP: {player} {old} → {level}")
                 send_up_embed(player, old, level)
                 last_levels[player] = level
+
             elif level < old:
+                print(f"💀 DOWN: {player} {old} → {level}")
                 send_death_embed(player, old, level)
                 last_levels[player] = level
 
-            print(f"{player}: {level}")
+            else:
+                print(f"✔ {player}: {level}")
 
         save_last_levels(last_levels)
+        print(f"⏳ Aguardando {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
 
 
