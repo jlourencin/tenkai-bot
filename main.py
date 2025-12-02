@@ -5,206 +5,178 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import json
+from urllib.parse import quote_plus
 
-# === CONFIGURAÇÕES ===
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")  # webhook do Discord
+# =========================
+# VARIÁVEIS (IGUAL TAIKAI)
+# =========================
 
-# WATCHED_PLAYERS via variável de ambiente:
-# Ex: WATCHED_PLAYERS="Joao, Maria;Jose"
-raw_players = os.environ.get("WATCHED_PLAYERS", "")
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
+
+_raw_players = os.environ.get("WATCHED_PLAYERS", "")
 WATCHED_PLAYERS = [
-    p.strip() for p in raw_players.replace(";", ",").split(",") if p.strip()
+    p.strip() for p in _raw_players.replace(";", ",").split(",") if p.strip()
 ]
 
-CHECK_INTERVAL = 60  # intervalo de checagem em segundos
-MIN_LEVEL = 690      # nível mínimo para considerar up/morte
-
+CHECK_INTERVAL = 60        # padrão igual Taikai
+MIN_LEVEL = 1              # padrão igual Taikai
 STATE_FILE = "last_levels.json"
 
-# === SERVIDOR FLASK PARA MANTER ONLINE ===
+# URL fixa (igual Taikai usa interna no código)
+def build_profile_url(name):
+    encoded = quote_plus(name)
+    return f"https://ntotenkai.com.br/?characters/{encoded}"
+
+# =========================
+# FLASK KEEP ALIVE
+# =========================
+
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Bot Tenkai está rodando!", 200
+    return "✅ Bot Tenkai rodando! Monitora: " + ", ".join(WATCHED_PLAYERS), 200
 
-# === FUNÇÕES ===
+# =========================
+# ARQUIVO DE ESTADO
+# =========================
 
-def get_online_players():
-    url = "https://ntotenkai.com.br/online"
+def load_last_levels():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_last_levels(data):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# =========================
+# EMBEDS DISCORD
+# =========================
+
+def send_up_embed(player, old, new):
+    diff = new - old
+    embed = {
+        "title": "☠️ UPOU PARA MORRER",
+        "description": f"**{player}** subiu de nível e já vai morrer kkkk xd ☠️🔪",
+        "color": 0x00FF00,
+        "fields": [
+            {"name": "💩 Jogador", "value": player, "inline": True},
+            {"name": "📈 Level", "value": f"{old} → {new} (+{diff})", "inline": True},
+        ],
+        "footer": {"text": "🔥 JOHTTO HACKER DEUS"},
+    }
+    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+
+
+def send_death_embed(player, old, new):
+    embed = {
+        "title": "💀 XIIII MORREU NOOB",
+        "description": f"☠️ **{player}** já morreu noobasso",
+        "color": 0xFF0000,
+        "fields": [
+            {"name": "💩 Jogador", "value": player, "inline": True},
+            {"name": "📉 Level", "value": f"{old} → {new}", "inline": True},
+        ],
+        "footer": {"text": "🔥 JOHTTO HACKER DEUS"},
+    }
+    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+
+# =========================
+# RASPAGEM DE LEVEL
+# =========================
+
+def get_level_from_profile(name):
+    url = build_profile_url(name)
     headers = {
-        # User-Agent de navegador real
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/142.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://ntotenkai.com.br/",
+        )
     }
 
     try:
         r = requests.get(url, headers=headers, timeout=10)
-        print("[DEBUG] Status ao acessar /online:", r.status_code)
-
-        if r.status_code == 403:
-            print("[ERRO] 403 Forbidden: o servidor está bloqueando a requisição do bot.")
-            return []
-
-        r.raise_for_status()
     except Exception as e:
-        print("[ERRO] Falha ao acessar o site:", e)
-        return []
+        print(f"[ERRO] Falha ao acessar {name}: {e}")
+        return None
+
+    if r.status_code != 200:
+        print(f"[ERRO] Perfil de {name} retornou {r.status_code}")
+        return None
 
     soup = BeautifulSoup(r.text, "html.parser")
-    players = []
 
-    for row in soup.select("tr"):
-        cols = row.find_all("td")
-        if len(cols) >= 2 and cols[1].text.strip().isdigit():
-            name = cols[0].text.strip()
-            level = int(cols[1].text.strip())
-            players.append((name, level))
+    td_level = soup.find("td", string=lambda s: s and s.strip().lower() == "level:")
+    if not td_level:
+        print(f"[ERRO] Level não encontrado em {name}")
+        return None
 
-    return players
+    value = td_level.find_next("td").text.strip()
 
+    if not value.isdigit():
+        print(f"[ERRO] Level inválido para {name}: {value}")
+        return None
 
-def send_embed_to_discord(jogador, old_level, new_level):
-    embed = {
-        "title": "☠️ UPOU PARA MORRER",
-        "description": "**%s** subiu de nível e já vai morrer kkkk xd ☠️🔪" % jogador,
-        "color": 0x00FF00,
-        "fields": [
-            {
-                "name": "💩 Jogador",
-                "value": jogador,
-                "inline": True,
-            },
-            {
-                "name": "📈 Level",
-                "value": "%s -> %s" % (old_level, new_level),
-                "inline": True,
-            },
-        ],
-        "footer": {
-            "text": "🔥 JOHTTO HACKER DEUS",
-        },
-    }
+    return int(value)
 
-    payload = {"embeds": [embed]}
+# =========================
+# LOOP PRINCIPAL
+# =========================
 
-    try:
-        response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-        if response.status_code not in (200, 204):
-            print("[ERRO] Webhook falhou com status", response.status_code)
-            print("[RESPOSTA]", response.text)
-        else:
-            print("[OK] Mensagem de UP enviada ao Discord.")
-    except Exception as e:
-        print("[ERRO] Falha ao enviar embed de UP:", e)
+def monitor_loop():
+    print("▶ Monitorando:", WATCHED_PLAYERS)
+    print("Intervalo:", CHECK_INTERVAL)
 
-
-def send_death_embed_to_discord(jogador, old_level, new_level):
-    embed = {
-        "title": "💀 XIIII MORREU NOOB",
-        "description": "☠️ **%s** já morreu noobasso" % jogador,
-        "color": 0xFF0000,
-        "fields": [
-            {
-                "name": "💩 Jogador",
-                "value": jogador,
-                "inline": True,
-            },
-            {
-                "name": "📉 Level",
-                "value": "%s -> %s" % (old_level, new_level),
-                "inline": True,
-            },
-        ],
-        "footer": {
-            "text": "🔥 JOHTTO HACKER DEUS",
-        },
-    }
-
-    payload = {"embeds": [embed]}
-
-    try:
-        response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-        if response.status_code not in (200, 204):
-            print("[ERRO] Webhook falhou com status", response.status_code)
-            print("[RESPOSTA]", response.text)
-        else:
-            print("[OK] Mensagem de MORTE enviada ao Discord.")
-    except Exception as e:
-        print("[ERRO] Falha ao enviar embed de MORTE:", e)
-
-
-def load_last_levels():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        return {}
-
-
-def save_last_levels(levels):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(levels, f)
-
-
-def monitor():
     last_levels = load_last_levels()
 
     while True:
-        print("🔍 Verificando jogadores online...")
-        players_online = get_online_players()
-        online_dict = {name: level for name, level in players_online}
-
         for player in WATCHED_PLAYERS:
-            player = player.strip()
-            if not player:
+            level = get_level_from_profile(player)
+            if level is None:
+                print(f"❌ {player}: falha no perfil")
                 continue
 
-            current_level = online_dict.get(player)
-            last_level = last_levels.get(player)
+            old = last_levels.get(player)
 
-            if current_level is not None and current_level >= MIN_LEVEL:
-                if last_level is None:
-                    print("🔸 Primeiro registro de %s: nível %s" % (player, current_level))
-                    last_levels[player] = current_level
+            if level < MIN_LEVEL:
+                print(f"⚠️ {player} ({level}) < MIN_LEVEL")
+                last_levels[player] = level
+                continue
 
-                elif current_level > last_level:
-                    print("🚀 %s upou! %s -> %s 🎉" % (player, last_level, current_level))
-                    send_embed_to_discord(player, last_level, current_level)
-                    last_levels[player] = current_level
+            if old is None:
+                print(f"🟦 Primeiro registro: {player} = {level}")
+                last_levels[player] = level
 
-                elif current_level < last_level:
-                    print("💀 %s morreu ou perdeu XP! %s -> %s" % (player, last_level, current_level))
-                    send_death_embed_to_discord(player, last_level, current_level)
-                    last_levels[player] = current_level
+            elif level > old:
+                print(f"🚀 UP: {player} {old} → {level}")
+                send_up_embed(player, old, level)
+                last_levels[player] = level
 
-                else:
-                    print("✅ %s está no nível %s (sem up ou down)." % (player, current_level))
-
-            elif current_level is not None and current_level < MIN_LEVEL:
-                print(
-                    "⚠️ %s está no nível %s, abaixo do mínimo (%s). Ignorado."
-                    % (player, current_level, MIN_LEVEL)
-                )
+            elif level < old:
+                print(f"💀 DOWN: {player} {old} → {level}")
+                send_death_embed(player, old, level)
+                last_levels[player] = level
 
             else:
-                print("❌ %s está offline ou não está na lista de onlines." % player)
+                print(f"✔ {player}: {level}")
 
         save_last_levels(last_levels)
-        print("🕒 Aguardando %s segundos...\n" % CHECK_INTERVAL)
+        print(f"⏳ Aguardando {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
 
+# =========================
+# MAIN
+# =========================
 
-# === EXECUÇÃO ===
 if __name__ == "__main__":
-    t = threading.Thread(target=monitor, daemon=True)
+    t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
 
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
