@@ -5,9 +5,9 @@ import threading
 import re
 
 import requests
-import cloudscraper
 from bs4 import BeautifulSoup
 from flask import Flask
+from curl_cffi import requests as curl_requests  # <- novo
 
 # ======================
 # VARIÁVEIS DE AMBIENTE
@@ -33,7 +33,7 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     return (
-        "✅ Bot CLOUDSCRAPER rodando!<br>"
+        "✅ Bot curl_cffi rodando!<br>"
         f"Jogadores monitorados: {', '.join(WATCHED_PLAYERS) or 'nenhum'}<br>"
         f"Página de online: {ONLINE_URL}<br>"
         f"Intervalo: {CHECK_INTERVAL}s"
@@ -56,22 +56,15 @@ def load_last_levels():
     return {}
 
 def save_last_levels(d):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=2, ensure_ascii=False)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ERRO] Falha ao salvar {STATE_FILE}: {e}")
 
 # ======================
-# BYPASS CLOUDFLARE (CLOUDSCRAPER)
+# BYPASS (curl_cffi → TLS do Chrome real)
 # ======================
-
-scraper = cloudscraper.create_scraper(
-    browser={
-        "browser": "chrome",
-        "platform": "windows",
-        "mobile": False
-    }
-)
-
-from curl_cffi import requests as curl_requests
 
 def fetch_online_html():
     try:
@@ -79,12 +72,13 @@ def fetch_online_html():
 
         r = curl_requests.get(
             ONLINE_URL,
-            impersonate="chrome120",   # fingerprint real
+            impersonate="chrome120",   # fingerprint de Chrome recente
             timeout=20,
-            verify=False,              # ignora SSL estranho
+            verify=False,
             headers={
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "accept-language": "en-US,en;q=0.9",
+                "upgrade-insecure-requests": "1",
             },
         )
 
@@ -92,14 +86,18 @@ def fetch_online_html():
             print(f"[ERRO] Status {r.status_code}")
             return None
 
-        return r.text
+        html = r.text
+
+        if "Just a moment" in html or "cf-browser-verification" in html:
+            print("⚠ Ainda parece página de proteção Cloudflare.")
+        return html
 
     except Exception as e:
         print(f"[ERRO] curl_cffi: {e}")
         return None
 
 # ======================
-# PARSER
+# PARSER DA TABELA
 # ======================
 
 def parse_online_players(html):
@@ -144,24 +142,28 @@ def parse_online_players(html):
 def send_up(player, old, new):
     if not DISCORD_WEBHOOK:
         return
-    requests.post(DISCORD_WEBHOOK, json={
-        "embeds": [{
-            "title": "⚡ UP!",
-            "description": f"{player} subiu de {old} → {new}",
-            "color": 0x00FF00
-        }]
-    })
+    embed = {
+        "title": "⚡ UP!",
+        "description": f"{player} subiu de {old} → {new}",
+        "color": 0x00FF00,
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    except Exception as e:
+        print(f"[ERRO] Webhook UP: {e}")
 
 def send_down(player, old, new):
     if not DISCORD_WEBHOOK:
         return
-    requests.post(DISCORD_WEBHOOK, json={
-        "embeds": [{
-            "title": "💀 DOWN!",
-            "description": f"{player} caiu de {old} → {new}",
-            "color": 0xFF0000
-        }]
-    })
+    embed = {
+        "title": "💀 DOWN!",
+        "description": f"{player} caiu de {old} → {new}",
+        "color": 0xFF0000,
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+    except Exception as e:
+        print(f"[ERRO] Webhook DOWN: {e}")
 
 # ======================
 # LOOP
@@ -169,7 +171,7 @@ def send_down(player, old, new):
 
 def monitor():
     last = load_last_levels()
-    print("▶ Bot CloudScraper iniciado!")
+    print("▶ Bot curl_cffi iniciado!")
     print("Jogadores monitorados:", WATCHED_PLAYERS)
 
     while True:
