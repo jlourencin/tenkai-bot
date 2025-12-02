@@ -3,6 +3,7 @@ import time
 import json
 import threading
 import re
+
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
@@ -11,33 +12,42 @@ from playwright.sync_api import sync_playwright
 # ======================
 # VARIÁVEIS DE AMBIENTE
 # ======================
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
+
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 _raw_players = os.environ.get("WATCHED_PLAYERS", "")
 
 WATCHED_PLAYERS = [
     p.strip() for p in _raw_players.replace(";", ",").split(",") if p.strip()
 ]
 
+if not WATCHED_PLAYERS:
+    print("[AVISO] WATCHED_PLAYERS não configurado ou vazio.")
+
+if not DISCORD_WEBHOOK:
+    print("[AVISO] DISCORD_WEBHOOK_URL não configurado. Não será possível enviar embeds.")
+
 # ======================
 # CONFIGURAÇÃO DO SITE
 # ======================
-# 👉 TROQUE SOMENTE ISTO
+# 🔧 TROQUE SOMENTE ESSA URL PARA A PÁGINA DE ONLINE DO SEU SITE
 ONLINE_URL = "https://ntotenkai.com.br/online"
 
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 60  # segundos
 STATE_FILE = "last_levels.json"
 
 # ======================
 # FLASK
 # ======================
+
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return (
         "✅ Bot Playwright (online page) rodando!<br>"
-        f"Jogadores monitorados: {', '.join(WATCHED_PLAYERS)}<br>"
-        f"Página de online: {ONLINE_URL}"
+        f"Jogadores monitorados: {', '.join(WATCHED_PLAYERS) or 'nenhum'}<br>"
+        f"Página de online: {ONLINE_URL}<br>"
+        f"Intervalo: {CHECK_INTERVAL}s"
     )
 
 @app.route("/health")
@@ -53,19 +63,27 @@ def load_last_levels():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
     return {}
 
 def save_last_levels(levels):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(levels, f, indent=2, ensure_ascii=False)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(levels, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ERRO] Falha ao salvar {STATE_FILE}: {e}")
 
 # ======================
 # PLAYWRIGHT → HTML
 # ======================
 
 def fetch_online_html() -> str | None:
+    """
+    Abre a página de online em um navegador headless (Chromium via Playwright)
+    e retorna o HTML.
+    """
+    print(f"[DEBUG] Abrindo página de online: {ONLINE_URL}")
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
@@ -74,7 +92,6 @@ def fetch_online_html() -> str | None:
             html = page.content()
             browser.close()
             return html
-
     except Exception as e:
         print(f"[ERRO] Falha Playwright ao abrir ONLINE_URL: {e}")
         return None
@@ -85,17 +102,20 @@ def fetch_online_html() -> str | None:
 
 def parse_online_players(html: str) -> dict:
     """
-    Retorna dict no formato:
+    Converte o HTML em um dicionário:
     {
-        "Alienwarre": 527,
-        "Zeus": 480,
+        "Jogador1": 500,
+        "Jogador2": 750,
         ...
     }
+
+    Assumindo uma tabela do tipo:
+      <tr><td>Nome</td><td>Level</td></tr>
+    Se o seu HTML for diferente, adaptamos essa função.
     """
     soup = BeautifulSoup(html, "html.parser")
     online = {}
 
-    # Procura tabelas e linhas
     for row in soup.find_all("tr"):
         cols = row.find_all("td")
         if len(cols) < 2:
@@ -104,7 +124,11 @@ def parse_online_players(html: str) -> dict:
         name = cols[0].get_text(strip=True)
         lvl_txt = cols[1].get_text(strip=True)
 
-        if not re.match(r"^\d+$", lvl_txt):
+        if not name:
+            continue
+
+        # só aceita level que seja número
+        if not re.fullmatch(r"\d+", lvl_txt):
             continue
 
         level = int(lvl_txt)
@@ -116,37 +140,53 @@ def parse_online_players(html: str) -> dict:
 # DISCORD
 # ======================
 
-def send_up(p, old, new):
+def send_up(player, old, new):
+    if not DISCORD_WEBHOOK:
+        return
     embed = {
         "title": "☠️ UPOU PARA MORRER",
-        "description": f"**{p}** subiu de nível!",
+        "description": f"**{player}** subiu de nível!",
         "color": 0x00FF00,
         "fields": [
-            {"name": "Jogador", "value": p, "inline": True},
+            {"name": "Jogador", "value": player, "inline": True},
             {"name": "Level", "value": f"{old} → {new}", "inline": True},
-        ]
+        ],
     }
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+        if r.status_code not in (200, 204):
+            print(f"[ERRO] Webhook UP status {r.status_code}: {r.text}")
+    except Exception as e:
+        print(f"[ERRO] Falha ao enviar embed de UP: {e}")
 
-def send_down(p, old, new):
+def send_down(player, old, new):
+    if not DISCORD_WEBHOOK:
+        return
     embed = {
         "title": "💀 XIIII MORREU NOOB",
-        "description": f"**{p}** perdeu level!",
+        "description": f"**{player}** perdeu level!",
         "color": 0xFF0000,
         "fields": [
-            {"name": "Jogador", "value": p, "inline": True},
+            {"name": "Jogador", "value": player, "inline": True},
             {"name": "Level", "value": f"{old} → {new}", "inline": True},
-        ]
+        ],
     }
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+        if r.status_code not in (200, 204):
+            print(f"[ERRO] Webhook DOWN status {r.status_code}: {r.text}")
+    except Exception as e:
+        print(f"[ERRO] Falha ao enviar embed de DOWN: {e}")
 
 # ======================
-# BOT LOOP
+# LOOP DO BOT
 # ======================
 
 def monitor():
     last = load_last_levels()
     print("▶ Bot Playwright + Online Page iniciado!")
+    print("Jogadores monitorados:", WATCHED_PLAYERS)
+    print("ONLINE_URL:", ONLINE_URL)
 
     while True:
         html = fetch_online_html()
@@ -156,14 +196,14 @@ def monitor():
             continue
 
         online = parse_online_players(html)
-        print("🔎 Players online:", list(online.keys()))
+        print("🔎 Players online encontrados:", list(online.keys()))
 
         for player in WATCHED_PLAYERS:
             current = online.get(player)
             old = last.get(player)
 
             if current is None:
-                print(f"❌ {player} está offline.")
+                print(f"❌ {player} está offline ou não está na lista de online.")
                 continue
 
             if old is None:
@@ -192,6 +232,10 @@ def monitor():
 # ======================
 
 if __name__ == "__main__":
-    threading.Thread(target=monitor, daemon=True).start()
+    # Thread do bot
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
+
+    # Flask para Railway
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
