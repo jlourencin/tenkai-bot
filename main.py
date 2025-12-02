@@ -2,18 +2,22 @@ import os
 import time
 import json
 import threading
-import re
 
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
-from curl_cffi import requests as curl_requests  # <- novo
 
-# ======================
+# ==========================
 # VARIÁVEIS DE AMBIENTE
-# ======================
+# ==========================
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+
+PROXY_HOST = os.environ.get("PROXY_HOST", "").strip()
+PROXY_PORT = os.environ.get("PROXY_PORT", "").strip()
+PROXY_USER = os.environ.get("PROXY_USER", "").strip()
+PROXY_PASS = os.environ.get("PROXY_PASS", "").strip()
+
 _raw_players = os.environ.get("WATCHED_PLAYERS", "")
 
 WATCHED_PLAYERS = [
@@ -21,203 +25,18 @@ WATCHED_PLAYERS = [
 ]
 
 ONLINE_URL = "https://ntotenkai.com.br/online"
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 60  # segundos
 STATE_FILE = "last_levels.json"
 
-# ======================
-# FLASK
-# ======================
+# ==========================
+# CONFIG DO PROXY
+# ==========================
 
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return (
-        "✅ Bot curl_cffi rodando!<br>"
-        f"Jogadores monitorados: {', '.join(WATCHED_PLAYERS) or 'nenhum'}<br>"
-        f"Página de online: {ONLINE_URL}<br>"
-        f"Intervalo: {CHECK_INTERVAL}s"
-    )
-
-@app.route("/health")
-def health():
-    return "OK", 200
-
-# ======================
-# ESTADO
-# ======================
-
-def load_last_levels():
-    if os.path.exists(STATE_FILE):
-        try:
-            return json.load(open(STATE_FILE, "r", encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-def save_last_levels(d):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"[ERRO] Falha ao salvar {STATE_FILE}: {e}")
-
-# ======================
-# BYPASS (curl_cffi → TLS do Chrome real)
-# ======================
-
-def fetch_online_html():
-    try:
-        print(f"[DEBUG] Acessando {ONLINE_URL} com curl_cffi (TLS real)...")
-
-        r = curl_requests.get(
-            ONLINE_URL,
-            impersonate="chrome120",   # fingerprint de Chrome recente
-            timeout=20,
-            verify=False,
-            headers={
-                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "accept-language": "en-US,en;q=0.9",
-                "upgrade-insecure-requests": "1",
-            },
-        )
-
-        if r.status_code != 200:
-            print(f"[ERRO] Status {r.status_code}")
-            return None
-
-        html = r.text
-
-        if "Just a moment" in html or "cf-browser-verification" in html:
-            print("⚠ Ainda parece página de proteção Cloudflare.")
-        return html
-
-    except Exception as e:
-        print(f"[ERRO] curl_cffi: {e}")
+def build_proxy_dict():
+    if not (PROXY_HOST and PROXY_PORT and PROXY_USER and PROXY_PASS):
+        print("[AVISO] Proxy não configurado completamente. Acesso direto será usado (pode dar 403).")
         return None
 
-# ======================
-# PARSER DA TABELA
-# ======================
-
-def parse_online_players(html):
-    soup = BeautifulSoup(html, "html.parser")
-    online = {}
-
-    tables = soup.find_all("table")
-    if not tables:
-        print("[WARN] Nenhuma tabela encontrada.")
-        return online
-
-    target = None
-    for t in tables:
-        if any(x in t.get_text() for x in ["Players Online", "Vocation", "Level"]):
-            target = t
-            break
-
-    if not target:
-        print("[WARN] Nenhuma tabela válida encontrada.")
-        return online
-
-    for row in target.find_all("tr"):
-        cols = row.find_all("td")
-        if len(cols) < 4:
-            continue
-
-        name = cols[2].get_text(strip=True)
-        lvl = cols[3].get_text(strip=True)
-
-        m = re.search(r"\d+", lvl)
-        if not name or not m:
-            continue
-
-        online[name] = int(m.group(0))
-
-    return online
-
-# ======================
-# DISCORD
-# ======================
-
-def send_up(player, old, new):
-    if not DISCORD_WEBHOOK:
-        return
-    embed = {
-        "title": "⚡ UP!",
-        "description": f"{player} subiu de {old} → {new}",
-        "color": 0x00FF00,
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
-    except Exception as e:
-        print(f"[ERRO] Webhook UP: {e}")
-
-def send_down(player, old, new):
-    if not DISCORD_WEBHOOK:
-        return
-    embed = {
-        "title": "💀 DOWN!",
-        "description": f"{player} caiu de {old} → {new}",
-        "color": 0xFF0000,
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
-    except Exception as e:
-        print(f"[ERRO] Webhook DOWN: {e}")
-
-# ======================
-# LOOP
-# ======================
-
-def monitor():
-    last = load_last_levels()
-    print("▶ Bot curl_cffi iniciado!")
-    print("Jogadores monitorados:", WATCHED_PLAYERS)
-
-    while True:
-        html = fetch_online_html()
-
-        if not html:
-            print("❌ HTML vazio, tentando de novo...")
-            time.sleep(CHECK_INTERVAL)
-            continue
-
-        online = parse_online_players(html)
-        print("🔎 Players online encontrados:", list(online.keys()))
-
-        for p in WATCHED_PLAYERS:
-            current = online.get(p)
-            old = last.get(p)
-
-            if current is None:
-                print(f"❌ {p} OFFLINE")
-                continue
-
-            if old is None:
-                print(f"📍 Primeiro registro: {p} = {current}")
-                last[p] = current
-            elif current > old:
-                print(f"⚡ UP {p}: {old} → {current}")
-                send_up(p, old, current)
-                last[p] = current
-            elif current < old:
-                print(f"💀 DOWN {p}: {old} → {current}")
-                send_down(p, old, current)
-                last[p] = current
-            else:
-                print(f"✔ {p}: {current}")
-
-        save_last_levels(last)
-        print(f"⏳ Aguardando {CHECK_INTERVAL}s...\n")
-        time.sleep(CHECK_INTERVAL)
-
-# ======================
-# MAIN
-# ======================
-
-if __name__ == "__main__":
-    t = threading.Thread(target=monitor, daemon=True)
-    t.start()
-
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    proxy_url = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+    print(f"[INFO] Usando proxy: {PROXY_HOST}:{PROXY_PORT}")
+    return {
